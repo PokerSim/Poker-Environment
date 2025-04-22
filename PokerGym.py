@@ -2,6 +2,7 @@ import numpy as np
 import random
 import gym
 from gym import spaces
+from pokerkit import Combo, Board
 
 class PokerEnv(gym.Env):
     def __init__(self, players, agent_index=0):
@@ -19,7 +20,7 @@ class PokerEnv(gym.Env):
         self.current_bet = 0
         self.action_pointer = 0
 
-        self.action_space = spaces.Discrete(3)  # Fold, Call, Raise
+        self.action_space = spaces.Discrete(3)
         self.observation_space = spaces.Box(low=0, high=1, shape=(107,), dtype=np.float32)
 
     def initialize_deck(self):
@@ -36,6 +37,9 @@ class PokerEnv(gym.Env):
             for player in self.players:
                 if player.active:
                     player.receive_card(self.deck.pop())
+        print("Dealt hands:")
+        for player in self.players:
+            print(f"{player.name}: {player.hand} (Chips: {player.chips})")
 
     def post_blinds(self):
         small_blind_player = self.get_next_active_player(self.dealer + 1)
@@ -46,6 +50,7 @@ class PokerEnv(gym.Env):
         big_blind_player.current_bet = self.big_blind
         self.pot += self.small_blind + self.big_blind
         self.current_bet = self.big_blind
+        print(f"Blinds posted: {small_blind_player.name} (SB), {big_blind_player.name} (BB)")
 
     def deal_community_cards(self):
         if self.round_stage == "flop":
@@ -54,10 +59,10 @@ class PokerEnv(gym.Env):
         elif self.round_stage in ["turn", "river"]:
             self.burn_cards.append(self.deck.pop())
             self.community_cards.append(self.deck.pop())
+        print(f"Board after {self.round_stage}: {self.community_cards}")
 
     def step(self, action):
         player = self.players[self.action_pointer]
-
         if not player.active:
             self._advance_pointer()
             return self._get_obs(), 0, False, {}
@@ -65,21 +70,26 @@ class PokerEnv(gym.Env):
         if self.action_pointer == self.agent_index:
             if action == 0:
                 player.active = False
+                print(f"{player.name} folds")
             elif action == 1:
                 player.take_action(self.current_bet)
+                print(f"{player.name} calls {self.current_bet}")
             elif action == 2:
                 player.take_action(self.current_bet + 20)
+                print(f"{player.name} raises to {self.current_bet + 20}")
         else:
             action_name, bet_amount = player.take_action(self.current_bet)
             if action_name == "fold":
                 player.active = False
+                print(f"{player.name} folds")
             else:
-                added_amount = bet_amount - player.current_bet
-                if added_amount > 0:
-                    player.chips -= added_amount
-                    self.pot += added_amount
+                added = bet_amount - player.current_bet
+                if added > 0:
+                    player.chips -= added
+                    self.pot += added
                     self.current_bet = max(self.current_bet, bet_amount)
                 player.current_bet = bet_amount
+                print(f"{player.name} {action_name}s to {bet_amount}")
 
         self._advance_pointer()
 
@@ -91,11 +101,7 @@ class PokerEnv(gym.Env):
 
         reward = 0
         if done:
-            winner = self.determine_winner()
-            if winner == self.players[self.agent_index]:
-                reward = self.pot
-            else:
-                reward = -self.players[self.agent_index].current_bet
+            reward = self.distribute_pot()
 
         return self._get_obs(), reward, done, {}
 
@@ -152,16 +158,35 @@ class PokerEnv(gym.Env):
             index = (index + 1) % len(self.players)
         return self.players[index]
 
-    def determine_winner(self):
-        best_score = -1
-        winner = None
+    def distribute_pot(self):
+        board = Board(" ".join(self.community_cards))
+        best_hand = None
+        winners = []
+
         for player in self.players:
-            if player.active:
-                score = sum(ord(c[0]) for c in player.hand)  # replace with real evaluation later
-                if score > best_score:
-                    best_score = score
-                    winner = player
-        return winner
+            if not player.active:
+                continue
+            try:
+                combo = Combo(" ".join(player.hand))
+                hand = combo.evaluate(board)
+                if best_hand is None or hand > best_hand:
+                    best_hand = hand
+                    winners = [player]
+                elif hand == best_hand:
+                    winners.append(player)
+            except:
+                continue
+
+        if len(winners) == 1:
+            winners[0].chips += self.pot
+        else:
+            share = self.pot // len(winners)
+            for winner in winners:
+                winner.chips += share
+
+        winner_names = ", ".join([w.name for w in winners])
+        print(f"Winner(s): {winner_names} win(s) pot of {self.pot}")
+        return self.pot / len(winners) if self.players[self.agent_index] in winners else -self.players[self.agent_index].current_bet
 
     def _get_obs(self):
         agent = self.players[self.agent_index]
